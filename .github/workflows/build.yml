@@ -13,6 +13,10 @@ name: build-openfi6c
 on:
   workflow_dispatch:
     inputs:
+      base_ref:
+        description: '底座引用：留空=最新发行 tag；也可填 openwrt-25.12 跟分支'
+        type: string
+        default: ''
       force:
         description: '内核版本不匹配也强行编译（调试用）'
         type: boolean
@@ -44,11 +48,34 @@ jobs:
       issues: write
 
     steps:
-      - name: 取出底座（ImmortalWrt 发行分支，零改动）
+      - name: 解析底座引用
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          REF="${{ github.event.inputs.base_ref }}"
+          if [ -z "$REF" ]; then
+            # 默认钉在**最新发行 tag**上（发行版语义，可复现）。
+            # 想跟分支就把 base_ref 填成 openwrt-25.12 —— 但分支随时可能 bump 内核，
+            # 一 bump 闭源驱动就得重新移植一次（见 README）。
+            REF=$(curl -s --max-time 30 "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" \
+              | python3 -c "
+import json,sys,re
+tags=[t['name'] for t in json.load(sys.stdin)]
+rel=[t for t in tags if re.match(r'^v25\.12\.\d+$', t)]
+rel.sort(key=lambda v: [int(x) for x in v[1:].split('.')])
+print(rel[-1] if rel else '')")
+          fi
+          [ -n "$REF" ] || REF="v25.12.2"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "底座引用：$REF"
+
+      - name: 取出底座（ImmortalWrt 发行版，零改动）
         uses: actions/checkout@v4
         with:
           repository: ${{ env.BASE_FORK }}
-          ref: openwrt-25.12
+          ref: ${{ steps.resolve.outputs.ref }}
           path: base
           fetch-depth: 1
 
@@ -71,7 +98,7 @@ jobs:
           {
             echo "| 项 | 值 |"
             echo "|---|---|"
-            echo "| 底座 | \`${BASE_FORK}@openwrt-25.12\` \`${BASE_HEAD}\` |"
+            echo "| 底座 | \`${BASE_FORK}@${{ steps.resolve.outputs.ref }}\` \`${BASE_HEAD}\` |"
             echo "| 底座内核 | \`6.12.${BASE_K}\` |"
             echo "| 本移植已验证 | \`6.12.${WANT_K}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

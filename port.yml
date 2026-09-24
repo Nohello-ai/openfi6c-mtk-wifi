@@ -7,7 +7,8 @@
 base:
   upstream: immortalwrt/immortalwrt
   fork: Nohello-ai/immortalwrt        # CI 从这里 checkout（fork 复制了全部分支）
-  branch: openwrt-25.12               # 发行分支，滚动跟；不是 master 快照
+  release_tag: v25.12.2               # 默认钉最新发行 tag —— 可复现，内核 6.12.103
+  branch: openwrt-25.12               # 可选：改跟分支。注意分支 HEAD 已是 6.12.108，需要移植
   kernel_line: "6.12"
 
 # ---------------------------------------------------------------- 闭源驱动

@@ -41,16 +41,22 @@ OpenFi 6C（MT7981B + MT7976CN）用的**联发科闭源 WiFi 整套**移植包�
 
 **CI**：推 `main` 或手动触发 workflow 即可。工作流会：
 
-1. checkout 干净的底座（`Nohello-ai/immortalwrt@openwrt-25.12`）
+1. checkout 干净的底座（默认**最新发行 tag**，如 `v25.12.2`；手动填 `base_ref` 可换成 `openwrt-25.12` 跟分支）
 2. `rm -rf package/kernel/mt76`
 3. 跑 `overlay/apply.sh` 打上闭源驱动 + 设备适配
 4. feeds → `make defconfig` → `make download` → `make -j`
 5. 产物上传为 artifact；手动选 `publish=true` 时发 Release
 
+> **为什么默认钉发行 tag 而不是跟分支**：分支是移动靶。
+> 实测（2026-09-24）：`openwrt-25.12` 分支 HEAD 的内核已经是 **6.12.108**，
+> 而最新发行 tag `v25.12.2` 是 **6.12.103** —— 闭源驱动只对后者验证过。
+> 钉 tag 能保证"编出来的固件 = 移植验证过的那套"；分支更新由 CI 的
+> 版本闸门负责发现（发现即失败 + 开 issue），不会悄悄编出没验证过的固件。
+
 **本地**（需要一台 Linux，内存 ≥ 8 GB、磁盘 ≥ 30 GB）：
 
 ```sh
-git clone -b openwrt-25.12 https://github.com/Nohello-ai/immortalwrt.git base
+git clone -b v25.12.2 https://github.com/Nohello-ai/immortalwrt.git base
 git clone https://github.com/Nohello-ai/openfi6c-mtk-wifi.git port
 cd base
 sh ../port/overlay/apply.sh
