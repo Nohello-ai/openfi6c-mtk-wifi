@@ -66,6 +66,24 @@ make defconfig
 make -j$(nproc)
 ```
 
+### 编译缓存（第二次开始快很多）
+
+三层，都走 `actions/cache`，key 以底座引用为前缀：
+
+| 缓存 | 路径 | 体积 | 省掉什么 |
+|---|---|---|---|
+| 源码包 | `base/dl` | ~1.5 GB | 重复下载内核/软件包 tarball |
+| 工具链 | `base/staging_dir`、`base/toolchain` | ~2.5 GB | 重建 host 工具 + 交叉工具链（约 40 分钟） |
+| 编译产物 | `base/.ccache` | ≤ 3 GB | 重复编译 C/C++（包编译的大头） |
+
+**两个坑（已经踩过并修掉）**：
+
+1. **只设 `CCACHE_*` 环境变量是没用的** —— OpenWrt 必须在 `.config` 里有 `CONFIG_CCACHE=y` 才会把 ccache 套到编译器前面（`include/rules.mk` 里 `TARGET_CC:=$(if $(CONFIG_CCACHE),ccache) $(TARGET_CC)`）。而这个选项被 `if DEVEL` 门控，所以要同时开 `CONFIG_DEVEL=y`。这两个已经在 `defconfig` 里加好。
+2. **`CCACHE_DIR` 环境变量会被覆盖** —— `include/rules.mk` 里 `export CCACHE_DIR:=$(CONFIG_CCACHE_DIR)`，默认 `$(TOPDIR)/.ccache`，优先级高于 CI 里设的环境变量。所以缓存路径必须是 `base/.ccache`，而不是工作区根目录的 `.ccache`；之前缓存的是个空目录。
+
+工作流现在会显式断言 `CONFIG_CCACHE=y`，没开就直接失败 —— 不会再出现"配了缓存但其实没生效"。
+缓存总量控制在 ~7 GB，低于 GitHub 每仓库 10 GB 的上限。
+
 ## 内核更新了怎么办（这就是"移植一次"）
 
 本仓库唯一需要人工维护的地方就是 `port.yml` 里的：

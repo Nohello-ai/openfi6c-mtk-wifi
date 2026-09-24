@@ -141,21 +141,47 @@ jobs:
             help2man patch time xsltproc zstd liblz4-tool libzstd-dev \
             device-tree-compiler lua5.1
 
+      # ---------------- 编译缓存：三层，命中越多年后越快 ----------------
+      # 预算：GitHub 每个仓库 10 GB 缓存上限。
+      #   dl/           ~1.5 GB  （软件包/内核源码包，省掉重复下载）
+      #   staging_dir   ~2.5 GB  （host 工具 + 交叉工具链，省掉重建工具链的 ~40 分钟）
+      #   ccache        ~3 GB    （编译产物缓存，包编译的大头）
+      - name: 缓存 dl/（源码包）
+        uses: actions/cache@v4
+        with:
+          path: base/dl
+          key: dl-${{ steps.resolve.outputs.ref }}-${{ hashFiles('base/feeds.conf.default') }}
+          restore-keys: |
+            dl-${{ steps.resolve.outputs.ref }}-
+
+      - name: 缓存 staging_dir + toolchain（省掉重建工具链）
+        uses: actions/cache@v4
+        with:
+          path: |
+            base/staging_dir
+            base/toolchain
+          key: staging-${{ steps.resolve.outputs.ref }}-${{ runner.arch }}-${{ hashFiles('port/defconfig/mt7981-ax3000-openfi6c.config') }}
+          restore-keys: |
+            staging-${{ steps.resolve.outputs.ref }}-
+
       - name: ccache 配置
         run: |
-          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          # ⚠️ OpenWrt 的 rules.mk 里 export CCACHE_DIR:=$(CONFIG_CCACHE_DIR) 默认 $(TOPDIR)/.ccache，
+          # 它**覆盖**这里的环境变量 —— 所以缓存路径必须是 base/.ccache，不是 workspace/.ccache。
+          # 前提是 .config 里有 CONFIG_CCACHE=y（见 defconfig），否则 ccache 相当于没开。
           echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          mkdir -p "${{ github.workspace }}/.ccache"
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
+          mkdir -p base/.ccache
 
       - name: 缓存 ccache
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-openfi6c-2512-${{ steps.kver.outputs.base_kernel }}-${{ github.sha }}
+          path: base/.ccache
+          key: ccache-${{ steps.resolve.outputs.ref }}-${{ steps.kver.outputs.base_kernel }}-${{ github.sha }}
           restore-keys: |
-            ccache-openfi6c-2512-${{ steps.kver.outputs.base_kernel }}-
-            ccache-openfi6c-2512-
+            ccache-${{ steps.resolve.outputs.ref }}-${{ steps.kver.outputs.base_kernel }}-
+            ccache-${{ steps.resolve.outputs.ref }}-
 
       - name: 打移植补丁（删 mt76 + 装闭源驱动 + 设备适配）
         run: |
@@ -183,6 +209,9 @@ jobs:
           grep -E 'CONFIG_PACKAGE_(luci-app-openfi|luci-app-openfi-modem|kmod-mt_wifi|kmod-mediatek_hnat|kmod-usb-net-rndis)=' .config || true
           echo "----- 确认没有把 mt76 选回来 -----"
           grep -E 'CONFIG_PACKAGE_kmod-mt7915e=' .config && { echo "::error::配置里仍有 kmod-mt7915e"; exit 1; } || echo "OK: 没有 kmod-mt7915e"
+          echo "----- 确认 ccache 真的开了 -----"
+          grep -q '^CONFIG_CCACHE=y' .config || { echo "::error::CONFIG_CCACHE 没生效，编译缓存形同虚设"; exit 1; }
+          echo "OK: CONFIG_CCACHE=y（缓存目录 $(TOPDIR 2>/dev/null || echo base)/.ccache）"
 
       - name: 下载源码包
         run: |
@@ -195,6 +224,12 @@ jobs:
           cd base
           set -o pipefail
           time make -j"$(nproc)" 2>&1 | tee /tmp/build.log
+
+      - name: ccache 命中统计
+        if: always()
+        run: |
+          base/staging_dir/host/bin/ccache -s 2>/dev/null || ccache -s 2>/dev/null || echo "（ccache 尚未生成，本次可能是首次构建）"
+          du -sh base/.ccache base/dl base/staging_dir 2>/dev/null || true
 
       - name: 编译失败诊断
         if: failure() && steps.compile.outcome == 'failure'
