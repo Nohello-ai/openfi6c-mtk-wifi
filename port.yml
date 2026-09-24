@@ -1,0 +1,45 @@
+# OpenFi 6C 闭源 WiFi 移植清单
+#
+# 这个仓库只有一件事：把联发科闭源 WiFi 整套挂到 ImmortalWrt 发行分支上。
+# 底座仓库一行不改，全部改动都由本仓库在 CI 里打上去 —— 所以底座永远能直接跟上游 merge。
+
+# ---------------------------------------------------------------- 底座
+base:
+  upstream: immortalwrt/immortalwrt
+  fork: Nohello-ai/immortalwrt        # CI 从这里 checkout（fork 复制了全部分支）
+  branch: openwrt-25.12               # 发行分支，滚动跟；不是 master 快照
+  kernel_line: "6.12"
+
+# ---------------------------------------------------------------- 闭源驱动
+driver:
+  name: mt_wifi
+  version: 7.6.7.3
+  tarball: mt79xx_20250408-705eb4.tar.xz
+  source: https://raw.githubusercontent.com/hanwckf/immortalwrt-mt798x/refs/heads/openwrt-21.02/dl
+  sha256: b029d7b43c498193092dc6a3c857361c8835ce34bb306561c550ac0539784a78
+  firmware: mt7981-fw-20260601
+  # 打包层 + 内核侧代码的出处：
+  upstream_packaging: chasey-dev/immortalwrt-mt798x-rebase
+  upstream_packaging_paths:
+    - package/mtk
+    - target/linux/mediatek/files-6.12
+    - target/linux/mediatek/patches-6.12
+  components:
+    - mt_wifi            # 闭源 WiFi 驱动本体（AP + STA 两个模块）
+    - warp               # WiFi 硬件加速（WARP v2）
+    - hnat               # 硬件 NAT / PPE 卸载（mt_wifi.ko 依赖 mtkhnat，不能拆）
+    - wifi_utility       # 内核侧 rbus 桥（驱动要的）
+    - wapp uapi          # 驱动用到的用户态头
+
+# ---------------------------------------------------------------- 移植状态
+# 唯一需要人工维护的地方：底座内核一变，移植一次，然后把下面两处改成新版本。
+verified_kernel: "6.12.103"
+
+ports:
+  - kernel: "6.12.103"
+    base_tag: v25.12.2
+    status: verified
+    note: >-
+      首次移植。ImmortalWrt v25.12.2 发行版自带的就是 6.12.103，
+      与闭源驱动 7.6.7.3 已知可编版本完全一致，故本仓库未对驱动源码做任何改动，
+      只搬运打包层 + 设备适配。

@@ -1,0 +1,245 @@
+name: build-openfi6c
+#
+# OpenFi 6C 固件：ImmortalWrt 发行分支（openwrt-25.12） + 联发科闭源 WiFi
+#
+# 这个工作流只做三件事：
+#   1. checkout 干净的底座（一行没改的 ImmortalWrt 发行分支）
+#   2. rm -rf package/kernel/mt76      ← 「删掉开源 WiFi 驱动」就这一行
+#   3. 把本仓库的闭源驱动 + 设备适配打上去，编译
+#
+# 内核版本对不上时会直接失败并开 issue —— 那就是「该移植了」的信号，
+# 绝不会悄悄放出一个编错了的固件。
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '内核版本不匹配也强行编译（调试用）'
+        type: boolean
+        default: false
+      publish:
+        description: '编译成功后发布 Release'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  schedule:
+    # 每周一 02:00 (UTC+8) 自动跑一次：上游 bump 内核后会在这里失败并开 issue
+    - cron: '0 18 * * 0'
+
+concurrency:
+  group: build-openfi6c-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASE_FORK: Nohello-ai/immortalwrt
+
+jobs:
+  build:
+    name: 编译 OpenFi 6C（闭源 WiFi）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: 取出底座（ImmortalWrt 发行分支，零改动）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BASE_FORK }}
+          ref: openwrt-25.12
+          path: base
+          fetch-depth: 1
+
+      - name: 取出移植包（本仓库）
+        uses: actions/checkout@v4
+        with:
+          path: port
+          fetch-depth: 1
+
+      - name: 读移植清单 + 校验内核版本
+        id: kver
+        run: |
+          set -eu
+          BASE_K=$(sed -n 's/^LINUX_VERSION-6\.12 = \.\?\(.*\)/\1/p' base/target/linux/generic/kernel-6.12)
+          WANT_K=$(sed -n 's/^verified_kernel:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' port/port.yml | sed 's/^6\.12\.//')
+          BASE_HEAD=$(git -C base rev-parse --short HEAD)
+          echo "base_kernel=6.12.${BASE_K}" >> "$GITHUB_OUTPUT"
+          echo "verified_kernel=6.12.${WANT_K}" >> "$GITHUB_OUTPUT"
+          echo "base_head=${BASE_HEAD}" >> "$GITHUB_OUTPUT"
+          {
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 底座 | \`${BASE_FORK}@openwrt-25.12\` \`${BASE_HEAD}\` |"
+            echo "| 底座内核 | \`6.12.${BASE_K}\` |"
+            echo "| 本移植已验证 | \`6.12.${WANT_K}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$BASE_K" != "$WANT_K" ]; then
+            echo "::error::内核从 6.12.${WANT_K} 变成 6.12.${BASE_K} —— 闭源驱动需要重新移植"
+            if [ "${{ github.event.inputs.force }}" = "true" ]; then
+              echo "::warning::force=true，继续编译（结果不保证可用）"
+            else
+              exit 1
+            fi
+          fi
+
+      - name: 内核变了就开 issue 提醒移植
+        if: failure() && steps.kver.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TITLE="需要移植：底座内核已升级到 ${{ steps.kver.outputs.base_kernel }}"
+          BODY=$(printf '底座的 ImmortalWrt 发行分支内核已经从 `%s` 升到 `%s`。\n\n闭源驱动 `mt_wifi 7.6.7.3` 是针对 `%s` 移植的，通常编不过。\n\n需要做的事：\n\n1. 拉最新底座，`sh overlay/apply.sh` 跑一遍，看第一处报错；\n2. 把 `target/linux/mediatek/patches-6.12/999-*.patch` 里失效的补丁 rebase 到新内核；\n3. 修 `package/mtk/drivers/mt_wifi` 的编译错误；\n4. 编过之后把 `port.yml` 的 `verified_kernel` 改成 `%s`，并加一条 `ports:` 记录。\n\n底座 HEAD：`%s`\n' "${{ steps.kver.outputs.verified_kernel }}" "${{ steps.kver.outputs.base_kernel }}" "${{ steps.kver.outputs.verified_kernel }}" "${{ steps.kver.outputs.base_kernel }}" "${{ steps.kver.outputs.base_head }}")
+          EXIST=$(gh issue list --repo "$GITHUB_REPOSITORY" --search "$TITLE in:title" --state open --json number --jq '.[0].number' || true)
+          if [ -n "${EXIST:-}" ]; then
+            gh issue comment "$EXIST" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: 释放磁盘空间
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /opt/google/chrome /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang flex bison g++ gawk gcc-multilib \
+            g++-multilib gettext libncurses-dev libssl-dev libelf-dev \
+            zlib1g-dev python3 python3-dev python3-setuptools python3-pyelftools \
+            python3-ply rsync unzip file wget curl ca-certificates subversion \
+            swig cmake ninja-build autoconf automake libtool pkgconf ccache \
+            help2man patch time xsltproc zstd liblz4-tool libzstd-dev \
+            device-tree-compiler lua5.1
+
+      - name: ccache 配置
+        run: |
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          mkdir -p "${{ github.workspace }}/.ccache"
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-openfi6c-2512-${{ steps.kver.outputs.base_kernel }}-${{ github.sha }}
+          restore-keys: |
+            ccache-openfi6c-2512-${{ steps.kver.outputs.base_kernel }}-
+            ccache-openfi6c-2512-
+
+      - name: 打移植补丁（删 mt76 + 装闭源驱动 + 设备适配）
+        run: |
+          cd base
+          sh "$GITHUB_WORKSPACE/port/overlay/apply.sh"
+          echo "----- 确认开源驱动已经不在了 -----"
+          ls package/kernel/mt76 2>/dev/null && { echo "::error::mt76 还在！"; exit 1; } || echo "OK: package/kernel/mt76 已删除"
+          echo "----- 确认闭源驱动在 -----"
+          ls -d package/mtk/drivers/mt_wifi package/mtk/drivers/warp >/dev/null
+          echo "OK: mt_wifi / warp 就位"
+
+      - name: 更新并安装 feeds
+        run: |
+          cd base
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用配置
+        run: |
+          cd base
+          cp "$GITHUB_WORKSPACE/port/defconfig/mt7981-ax3000-openfi6c.config" .config
+          make defconfig
+          echo "----- 关键配置确认 -----"
+          grep -E 'CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=' .config || true
+          grep -E 'CONFIG_PACKAGE_(luci-app-openfi|luci-app-openfi-modem|kmod-mt_wifi|kmod-mediatek_hnat|kmod-usb-net-rndis)=' .config || true
+          echo "----- 确认没有把 mt76 选回来 -----"
+          grep -E 'CONFIG_PACKAGE_kmod-mt7915e=' .config && { echo "::error::配置里仍有 kmod-mt7915e"; exit 1; } || echo "OK: 没有 kmod-mt7915e"
+
+      - name: 下载源码包
+        run: |
+          cd base
+          make download -j"$(nproc)" || make download -j1 V=s
+
+      - name: 编译
+        id: compile
+        run: |
+          cd base
+          set -o pipefail
+          time make -j"$(nproc)" 2>&1 | tee /tmp/build.log
+
+      - name: 编译失败诊断
+        if: failure() && steps.compile.outcome == 'failure'
+        run: |
+          echo "===================== 错误行 ====================="
+          grep -nE '(Error [0-9]+|error:|ERROR:|undefined reference|No rule to make target|fatal error|Hunk #.*FAILED|patch.*failed)' \
+            /tmp/build.log | tail -n 60 || true
+          echo ""
+          echo "===================== 日志最后 200 行 ====================="
+          tail -n 200 /tmp/build.log || true
+
+      - name: 收集产物
+        if: success()
+        run: |
+          mkdir -p out
+          find base/bin/targets/mediatek/filogic -type f \
+            \( -name '*openfi_6c*' -o -name '*.manifest' -o -name 'sha256sums' \) \
+            -exec cp {} out/ \; || true
+          ls -lh out/
+          (cd out && sha256sum * 2>/dev/null | tee sha256sums.new) || true
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.kver.outputs.base_kernel }}
+          path: /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfi6c-mtk-wifi-${{ steps.kver.outputs.base_kernel }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 Release
+        if: success() && github.event.inputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="v25.12-openfi6c-mtk-$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          cat > /tmp/notes.md <<NOTES
+          ## OpenFi 6C 固件 $TAG
+
+          | 项目 | 值 |
+          |---|---|
+          | 底座 | \`${BASE_FORK}\` @ \`openwrt-25.12\` \`${{ steps.kver.outputs.base_head }}\`（零改动） |
+          | 内核 | \`${{ steps.kver.outputs.base_kernel }}\` |
+          | WiFi | 联发科闭源 MT WiFi 7.6.7.3 + WARP v2 |
+          | 加速 | MTK HNAT（USB 模组走 external interface + rxppd 回送） |
+          | 开源驱动 | 已移除（\`package/kernel/mt76\` 不在固件里） |
+
+          ### 刷机
+
+          \`\`\`sh
+          sysupgrade -n /tmp/immortalwrt-mediatek-filogic-openfi_6c-squashfs-sysupgrade.bin
+          \`\`\`
+
+          默认 LAN \`192.168.1.1\`，root 无密码，WiFi 默认不加密 —— 刷完先改这三样。
+          NOTES
+          gh release create "$TAG" out/* \
+            --title "OpenFi 6C (闭源 WiFi) $TAG" \
+            --notes-file /tmp/notes.md \
+            --repo "$GITHUB_REPOSITORY"
